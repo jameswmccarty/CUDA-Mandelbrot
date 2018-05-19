@@ -6,7 +6,7 @@
 #include <assert.h>
 
 /* CUDA_N is the resolution of the output image (size CUDA_N x CUDA_N) */
-#define CUDA_N 8000
+#define CUDA_N 16000
 
 /* 8-bit red, green, and blue channels */
 typedef struct {
@@ -29,8 +29,10 @@ typedef struct {
 	char *palfile;
 	double esc_radius;
 	int counter_max;
-	double x,y,ref_x, ref_y;
+	double x, y, ref_x, ref_y;
+	double a, b, c;
 	double width;
+	int linedist;
 } fractal;
 
 void
@@ -106,7 +108,6 @@ point_dist(double x1, double x2, double y1, double y2)
 	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
 }
 
-/* TODO implement option to use line distance instead of point */
 /* distance between (x0, y0) and line (ax+by+c=0) */
 __device__ double
 line_dist(double x0, double y0, double a, double b, double c)
@@ -121,7 +122,8 @@ __global__ void
 render(pixel *pxls, 
 float xmin, float xmax, float ymin, float ymax, 
 double esc, int count_max, 
-double xref, double yref, 
+double xref, double yref,
+double a, double b, double c, int linedist, 
 palette *pal)
 {
 	int i, j, idx;
@@ -148,8 +150,9 @@ palette *pal)
 		y1 = 2. * x1 * y1 + y2;
 		x1 = xtmp;
 		counter++;
-
-		dist = min(dist, point_dist(x1,xref,y1,yref));
+		
+		dist = min(dist, 
+		linedist == 0 ?	point_dist(x1,xref,y1,yref) : line_dist(x1, y1, a, b, c));
 	}
 	idx = i + j*CUDA_N;
 	color_pxl(dist, pal, &r_out, &g_out, &b_out);
@@ -201,6 +204,7 @@ print_usage ()
 {
   /* print program use */
 
+  printf ("Render the Mandelbrot set using Orbit Traps.\n\n");
   printf ("mandel usage:\n");
   printf ("mandel [-options ...]\n\n");
   printf ("options include:\n");
@@ -212,9 +216,14 @@ print_usage ()
   printf ("\t-y #.###...#\t\tcenter Y coordinate of image\n");
   printf ("\t-rx #.###...#\t\tX coordinate for distance reference\n");
   printf ("\t-ry #.###...#\t\tY coordinate for distance reference\n");
+  printf ("\t-L\t\t\tuse the line equation for orbit trap instead of a point\n");
+  printf ("\t-a #.###...#\t\tA parameter of reference line in form Ax + By + C = 0\n");
+  printf ("\t-b #.###...#\t\tB parameter of reference line in form Ax + By + C = 0\n");
+  printf ("\t-c #.###...#\t\tC parameter of reference line in form Ax + By + C = 0\n");
   printf ("\t-w ##.#\t\t\twidth of image (x and y +/- width)\n");
   printf ("\t-m ####\t\t\tmax iterations to compute\n");
   printf ("\t-e ##.#\t\t\tescape radius\n");
+
 
 }
 
@@ -234,7 +243,7 @@ parse_args (int argc, char **argv, fractal * mandel)
 	  	mandel->outfile = argv[i + 1];
 	 	i += 2;
 		}
-    	else if (!strcmp (argv[i], "-p"))
+		else if (!strcmp (argv[i], "-p"))
 		{
 	  	mandel->palfile = argv[i + 1];
 	  	i += 2;
@@ -259,6 +268,21 @@ parse_args (int argc, char **argv, fractal * mandel)
 	  	mandel->ref_y = (double) atof(argv[i + 1]);
 	 	i += 2;
 		}
+		else if (!strcmp (argv[i], "-a"))
+		{
+	  	mandel->a = (double) atof(argv[i + 1]);
+	 	i += 2;
+		}
+		else if (!strcmp (argv[i], "-b"))
+		{
+	  	mandel->b = (double) atof(argv[i + 1]);
+	 	i += 2;
+		}
+		else if (!strcmp (argv[i], "-c"))
+		{
+	  	mandel->c = (double) atof(argv[i + 1]);
+	 	i += 2;
+		}
 		else if (!strcmp (argv[i], "-w"))
 		{
 	  	mandel->width = (double) atof(argv[i + 1]);
@@ -269,12 +293,17 @@ parse_args (int argc, char **argv, fractal * mandel)
 	  	mandel->counter_max = atoi(argv[i + 1]);
 	 	i += 2;
 		}
+		else if (!strcmp (argv[i], "-L"))
+		{
+	  	mandel->linedist = 1;
+	 	i += 1;
+		}
 		else if (!strcmp (argv[i], "-e"))
 		{
 	  	mandel->esc_radius = atof(argv[i + 1]);
 	 	i += 2;
 		}
-     	else
+		else
 		{
 	 	print_usage ();
 	  	exit (EXIT_FAILURE);
@@ -298,10 +327,19 @@ int main(int argc, char **argv)
 	mandel.ref_x = 0.0;
 	mandel.ref_y = 0.0;
 	mandel.width = 2.5;
+	mandel.a = 1.0;
+	mandel.b = -1.0;
+	mandel.c = 0.0;
+	mandel.linedist = 0;
 	cudaError_t err;
 
 	/* process input arguments */
 	parse_args(argc, argv, &mandel);
+	/* sanity check */
+	if(mandel.linedist == 1 && (mandel.a == 0.0 && mandel.b == 0.0)) {
+		printf("Illegal configuration.  A and B cannot both be set to zero.\n");
+		exit(EXIT_FAILURE);
+	}
 
 	/* HOST buffer for color palette */
 	mandel.h_palette = (palette*) malloc(sizeof(palette));
@@ -333,8 +371,6 @@ int main(int argc, char **argv)
 	dim3 threadsPerBlock(16, 16);
 	dim3 numBlocks(CUDA_N / threadsPerBlock.x, CUDA_N / threadsPerBlock.y);
 
-
-
 	/* copy palette to device */
 	/* copy the buffer from HOST to DEVICE */
 	err = cudaMemcpy(mandel.d_palette, mandel.h_palette, sizeof(palette), cudaMemcpyHostToDevice);
@@ -348,6 +384,7 @@ int main(int argc, char **argv)
 	mandel.x-mandel.width, mandel.x+mandel.width, mandel.y-mandel.width, mandel.y+mandel.width,
 	mandel.esc_radius, mandel.counter_max,
 	mandel.ref_x, mandel.ref_y,
+	mandel.a, mandel.b, mandel.c, mandel.linedist,
 	mandel.d_palette);
 	printf("Completed render.\n");
 
@@ -369,7 +406,6 @@ int main(int argc, char **argv)
 	cudaFree(mandel.d_pixels);
 	cudaFree(mandel.d_palette);
 	printf("Freed CUDA memory.\n");
-	/* and swap the pointer to the HOST copy */
 	/* then write the buffer to file */
 	write_to_tiff(&mandel);
 	/* and free the buffer */

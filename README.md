@@ -31,6 +31,14 @@ o -rx #.###...#           X coordinate for distance reference (default 0.0)
 
 o -ry #.###...#           Y coordinate for distance reference (default 0.0)
 
+o -L                      use the line equation for orbit trap instead of a point
+
+o -a #.###...#            A parameter of reference line in form Ax + By + C = 0
+
+o -b #.###...#            B parameter of reference line in form Ax + By + C = 0
+
+o -c #.###...#            C parameter of reference line in form Ax + By + C = 0
+
 o -w ##.#                 width of image (x and y +/- width) (default 2.5)
 
 o -m ####                 max iterations to compute (default 350)
